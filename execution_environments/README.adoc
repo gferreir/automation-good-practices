@@ -1,0 +1,528 @@
+= Execution Environments
+
+https://www.redhat.com/en/technologies/management/ansible[Ansible Automation Platform] 2.x uses execution environments (EEs) as portable, container-based Ansible runtimes.
+They replace the traditional Python virtual environments and decouple the control plane from the execution plane, allowing automation to run consistently regardless of where it is executed -- locally with `ansible-navigator`, in CI/CD pipelines, or through Automation Controller.
+
+EEs are built using https://ansible.readthedocs.io/projects/builder/en/latest/[`ansible-builder`], which reads an `execution-environment.yml` definition file and produces a container image.
+This section covers good practices for defining, building, and maintaining execution environments.
+
+For good practices on declaring EEs as objects in Automation Controller configuration, see <<aap_configuration/README.adoc#_aap_configuration_as_code,AAP Configuration as Code>>.
+For good practices on immutable references to EE images in production, see <<git_workflow/README.adoc#_never_use_latest_or_branch_names_in_production_references,Git Workflow: Never use "latest" or branch names in production references>>.
+For vulnerability scanning of built EE images, see <<security/README.adoc#_scan_container_images_and_generate_sboms_for_every_release,Security: Scan container images and generate SBOMs for every release>>.
+
+== Always use `version: 3` in the `execution-environment.yml` definition file
+[%collapsible]
+====
+Explanations::
+The `execution-environment.yml` definition file must specify `version: 3` as its first key.
++
+`ansible-builder` 3.x introduced a substantially richer schema (version 3) that is incompatible with version 1.
+If `version` is omitted, `ansible-builder` defaults to version 1.
+The consequence depends on the definition file contents:
++
+* If the file uses any v3-only key (`images:`, `options:`, `additional_build_files:`, inline galaxy collections, etc.), the build fails immediately with a `DefinitionError: Additional properties are not allowed`.
+* If the file uses only legacy v1 syntax (`build_arg_defaults.EE_BASE_IMAGE`, file-based dependencies), the build succeeds but emits an explicit deprecation warning -- `Found version 1, consider upgrading to version 3 or above` -- and produces an image that lacks all v3 capabilities.
++
+The version 3 schema structure is:
++
+[source,yaml]
+----
+version: 3
+
+images:
+  base_image:
+    name: <registry/namespace/image:tag>
+
+options:
+  package_manager_path: /usr/bin/microdnf   # required for ee-minimal images
+
+dependencies:
+  ansible_core:
+    package_pip: ansible-core==2.16.4
+  ansible_runner:
+    package_pip: ansible-runner==2.4.0
+  galaxy:
+    collections:
+      - name: <namespace.collection>
+        version: "<x.y.z>"
+  python:
+    - <package>==<version>
+  system:
+    - <package> [platform:rpm]
+
+additional_build_files: []
+
+additional_build_steps:
+  prepend_galaxy: []
+  prepend_final: []
+  append_final: []
+----
+
+Rationale::
+Omitting `version: 3` either causes an immediate build failure (when using v3 syntax) or produces a valid but limited image with a deprecation warning (when using legacy v1 syntax).
+In both cases the result is unintended and preventable.
++
+Specifying `version: 3` explicitly also documents the intended `ansible-builder` version requirement for readers and CI systems.
+
+.Do this:
+[source,yaml]
+----
+# execution-environment.yml
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"
+----
+
+.Don't do this:
+[source,yaml]
+----
+# Missing version: 3 -- ansible-builder defaults to the v1 schema
+# Using any v3-only key (images:, options:, additional_build_files:, etc.)
+# causes an immediate DefinitionError: "Additional properties are not allowed"
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"
+----
+====
+
+== Use `ee-minimal` as the base image for custom execution environments
+[%collapsible]
+====
+Explanations::
+Red Hat provides two categories of supported base images:
++
+* `ee-minimal` -- contains only `ansible-core` and `ansible-runner`.
+It is the recommended starting point for custom EEs.
+* `ee-supported` -- includes a curated set of pre-installed certified collections.
+It is designed to be used as-is in environments where its bundled content is sufficient.
+Using it as a base for custom images and then specifying additional or different versions of the same collections creates conflicts that are difficult to diagnose.
++
+Custom EEs should always build on `ee-minimal` and install only the collections, Python packages, and system dependencies required by the specific automation they support.
+
+Rationale::
+Starting from `ee-supported` as a base pulls hundreds of megabytes of pre-installed collections that may be unused, outdated relative to what the automation actually needs, or conflicting with specific version requirements.
++
+An EE built on `ee-minimal` is smaller, faster to pull, easier to reason about, and carries no transitive dependencies that were not explicitly chosen.
+
+.Do this:
+[source,yaml]
+----
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"
+      - name: ansible.posix
+        version: "1.5.4"
+----
+
+.Don't do this:
+[source,yaml]
+----
+version: 3
+
+# ee-supported already bundles a fixed version of amazon.aws (and many others).
+# Adding a different version here creates a conflict: two copies of the same
+# collection at different versions may be present in the image, leading to
+# unpredictable behavior at runtime.
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-supported-rhel9:2.16
+
+dependencies:
+  galaxy:
+    collections:
+      - name: amazon.aws
+        version: "8.0.0"
+----
+====
+
+== Always pin the base image to a specific version -- never use `:latest`
+[%collapsible]
+====
+Explanations::
+The base image tag in the `images.base_image.name` field must always reference a specific version, not the `:latest` shorthand.
++
+Red Hat distributes EE base images under two naming schemes, both requiring an explicit version:
++
+[cols="1,2,2"]
+|===
+| Type | Example | Use case
+
+| *Versioned* (tied to an AAP release)
+| `registry.redhat.io/ansible-automation-platform-27/ee-minimal-rhel9:2.7.0`
+| Production environments requiring a fixed `ansible-core` version aligned to a specific AAP release.
+
+| *Version-less* (tied to `ansible-core`)
+| `registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16`
+| Environments that track a specific `ansible-core` minor version across AAP releases.
+|===
++
+For maximum reproducibility in regulated or production environments, use the image digest (SHA) instead of a tag:
++
+[source,yaml]
+----
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9@sha256:<digest>
+----
++
+The digest is immutable: it always refers to the exact same image layer tree, even if the tag is updated.
+
+Rationale::
+The `:latest` tag on official Red Hat EE base images was removed starting with AAP 2.7.
+Any EE definition that still references `:latest` will fail to build.
++
+Even before this change, using `:latest` is inherently non-reproducible: two builds from the same `execution-environment.yml` file at different times could pull different base images, introducing changes that are invisible in the definition file and Git history.
+Pinning to a specific tag or digest ensures that every build is deterministic and that changes to the base image are deliberate and reviewable.
+
+.Do this:
+[source,yaml]
+----
+version: 3
+
+# Option A -- versioned tag (tied to AAP 2.7)
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform-27/ee-minimal-rhel9:2.7.0
+----
+
+[source,yaml]
+----
+version: 3
+
+# Option B -- version-less tag (tracks ansible-core 2.16.x)
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+----
+
+[source,yaml]
+----
+version: 3
+
+# Option C -- SHA digest for maximum reproducibility
+# Obtain the digest with: skopeo inspect docker://registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16 | jq -r .Digest
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9@sha256:<digest>
+----
+
+.Don't do this:
+[source,yaml]
+----
+version: 3
+
+# :latest was removed in AAP 2.7 -- this will fail to build
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:latest
+----
+====
+
+== Do not create monolithic execution environments -- group by automation domain
+[%collapsible]
+====
+Explanations::
+Each EE should contain only the dependencies required by a specific domain of automation.
+Common domain groupings include:
++
+* Linux / RHEL system management
+* Windows management
+* Networking (Cisco, Juniper, Arista, etc.)
+* Cloud (AWS, Azure, GCP)
+* Virtualization (VMware, OpenShift Virt)
++
+A separate, lightweight EE should be created for each domain rather than a single large image containing all collections.
+
+Rationale::
+Combining unrelated automation workloads into a single EE creates several problems:
++
+* *Dependency conflicts* -- networking collections may require specific Python library versions that conflict with those required by cloud collections.
+* *Image bloat* -- unused collections increase image size, slowing pulls and increasing storage costs in the registry.
+* *Maintenance burden* -- a change in any dependency forces a rebuild and validation of the entire image, even for unrelated automation.
+* *Blast radius* -- a broken dependency in the monolith disrupts all automation domains at once.
+
+.Do this:
+[source,yaml]
+----
+# ee-linux.yml -- for Linux/RHEL system management
+version: 3
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+options:
+  package_manager_path: /usr/bin/microdnf
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"
+      - name: ansible.posix
+        version: "1.5.4"
+----
+
+[source,yaml]
+----
+# ee-network.yml -- for network device management
+version: 3
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+options:
+  package_manager_path: /usr/bin/microdnf
+dependencies:
+  galaxy:
+    collections:
+      - name: cisco.ios
+        version: "10.1.1"
+      - name: ansible.netcommon
+        version: "7.1.0"
+  python:
+    - netaddr==1.3.0
+----
+
+.Don't do this:
+[source,yaml]
+----
+# ee-everything.yml -- single monolithic EE with unrelated domains
+version: 3
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles    # Linux
+        version: "1.23.0"
+      - name: cisco.ios                   # Networking
+        version: "10.1.1"
+      - name: amazon.aws                  # Cloud
+        version: "8.0.0"
+      - name: community.windows           # Windows
+        version: "2.3.0"
+----
+====
+
+== Pin all dependency versions explicitly
+[%collapsible]
+====
+Explanations::
+Every dependency referenced in an EE definition must be pinned to an exact version:
++
+* Collections in `dependencies.galaxy`: use the `version:` key with an exact version string (e.g., `"1.23.0"`).
+* Python packages in `dependencies.python`: use `==` pinning (e.g., `jmespath==1.0.1`).
+* System packages in `dependencies.system`: use the specific package name; avoid wildcards.
+* `ansible-core` and `ansible-runner` in `dependencies.ansible_core` / `dependencies.ansible_runner`: pin with `package_pip: ansible-core==<version>`.
++
+An external `requirements.yml` or `requirements.txt` file is equally valid, but the same pinning requirement applies to those files.
+
+Rationale::
+Ansible Galaxy, PyPI, and system package repositories release new versions continuously and independently of each other.
+Without explicit pins, two builds from the same `execution-environment.yml` file at different points in time can produce functionally different images.
+This breaks the reproducibility guarantee that makes EEs valuable.
++
+Pinning also makes dependency upgrades deliberate and reviewable: a version bump appears as a Git diff in the definition file, making it easy to understand what changed and why.
+
+.Do this:
+[source,yaml]
+----
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+options:
+  package_manager_path: /usr/bin/microdnf
+
+dependencies:
+  ansible_core:
+    package_pip: ansible-core==2.16.4
+  ansible_runner:
+    package_pip: ansible-runner==2.4.0
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"   # exact version pin
+      - name: ansible.posix
+        version: "1.5.4"    # exact version pin
+  python:
+    - jmespath==1.0.1       # exact version pin
+  system:
+    - git-core [platform:rpm]
+----
+
+.Don't do this:
+[source,yaml]
+----
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles  # no version pin
+      - name: ansible.posix
+        version: ">=1.0"               # range allows untested versions
+  python:
+    - jmespath                          # no pin -- installs latest
+----
+====
+
+== Set `package_manager_path` when using minimal base images
+[%collapsible]
+====
+Explanations::
+The `ee-minimal` image uses `microdnf` as its package manager, not `dnf`.
+When the EE definition includes system-level dependencies (`dependencies.system`) or custom build steps that invoke a package manager, the `options.package_manager_path` must be set to `/usr/bin/microdnf`.
++
+Without this setting, `ansible-builder` defaults to `/usr/bin/dnf`, which is not available in minimal images and causes the build to fail at the system package installation stage.
+
+Rationale::
+The error produced by a missing `package_manager_path` setting is not always obvious -- the build fails inside the generated `Containerfile` at the `RUN $PKGMGR` step, which may be difficult to trace back to the definition file without knowing the root cause.
+Setting this option explicitly makes the intent clear and prevents build failures when the definition is used on different hosts or in CI environments.
+
+.Do this:
+[source,yaml]
+----
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+options:
+  package_manager_path: /usr/bin/microdnf   # required for ee-minimal
+
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"
+  system:
+    - git-core [platform:rpm]
+    - python3-devel [platform:rpm]
+----
+
+.Don't do this:
+[source,yaml]
+----
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.16
+
+# Missing options.package_manager_path -- build will fail on system deps
+# because microdnf is not at /usr/bin/dnf
+
+dependencies:
+  galaxy:
+    collections:
+      - name: redhat.rhel_system_roles
+        version: "1.23.0"
+  system:
+    - git-core [platform:rpm]
+----
+====
+
+== Store EE definitions in Git and automate builds through a CI/CD pipeline
+[%collapsible]
+====
+Explanations::
+Every `execution-environment.yml` file, along with any supporting `requirements.yml`, `requirements.txt`, and `bindep.txt` files, must be stored in a Git repository.
++
+Builds must be triggered automatically by CI/CD pipelines on relevant Git events (push to a watched branch, pull request merge, or a scheduled trigger for regular security updates).
+They must not be run manually from developer workstations.
++
+The `infra.ee_utilities` collection from https://github.com/redhat-cop/ee_utilities[redhat-cop/ee_utilities] provides Ansible roles that integrate the build and push workflow directly into Automation Controller, allowing EE lifecycle management to be part of the broader Configuration as Code strategy.
++
+A typical repository structure for a team managing multiple EEs:
++
+[source]
+----
+ee-definitions/
+├── ee-linux/
+│   └── execution-environment.yml
+├── ee-network/
+│   └── execution-environment.yml
+├── ee-windows/
+│   └── execution-environment.yml
+└── ee-cloud/
+    ├── execution-environment.yml
+    └── requirements.txt
+----
+
+Rationale::
+Storing EE definitions in Git provides the same benefits as any other Configuration as Code practice: version control, auditability, peer review through pull requests, and the ability to roll back to a known-good state.
++
+A Git diff on a dependency bump (e.g., bumping a collection from `1.23.0` to `1.24.0`) is far more reviewable than a manually rebuilt image with no documented change history.
++
+Automated builds ensure that security patches in base images are applied regularly without relying on manual intervention, and that every change to an EE definition is validated before it reaches production.
+
+Examples::
++
+Minimal GitHub Actions workflow that builds and pushes an EE on every push to `main`:
++
+[source,yaml]
+----
+# .github/workflows/build-ee.yml
+name: Build Execution Environment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ee-linux/execution-environment.yml'
+  schedule:
+    - cron: '0 6 * * 1'  # weekly rebuild for security updates
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ansible-builder
+        run: pip install ansible-builder==3.1.1
+
+      - name: Build EE
+        run: |
+          ansible-builder build \
+            --file ee-linux/execution-environment.yml \
+            --tag quay.io/myorg/ee-linux:$(date +%Y-%m-%d) \
+            --container-runtime docker \
+            --verbosity 2
+
+      - name: Push to registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | \
+            docker login quay.io -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+          docker push quay.io/myorg/ee-linux:$(date +%Y-%m-%d)
+----
+====
