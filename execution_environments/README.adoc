@@ -110,7 +110,7 @@ Red Hat provides two categories of supported base images:
 It is the recommended starting point for custom EEs.
 * `ee-supported` -- includes a curated set of pre-installed certified collections.
 It is designed to be used as-is in environments where its bundled content is sufficient.
-Using it as a base for custom images and then specifying additional or different versions of the same collections creates conflicts that are difficult to diagnose.
+Using it as a base for custom images and then specifying additional or different versions of the same collections often creates conflicts that are difficult to diagnose.
 +
 Custom EEs should always build on `ee-minimal` and install only the collections, Python packages, and system dependencies required by the specific automation they support.
 
