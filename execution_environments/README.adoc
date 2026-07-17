@@ -261,7 +261,7 @@ Combining unrelated automation workloads into a single EE creates several proble
 +
 * *Dependency conflicts* -- networking collections may require specific Python library versions that conflict with those required by cloud collections.
 * *Image bloat* -- unused collections increase image size, slowing pulls and increasing storage costs in the registry.
-* *Maintenance burden* -- a change in any dependency forces a rebuild and validation of the entire image, even for unrelated automation.
+* *Maintenance burden* -- a change in any dependency forces a rebuild and revalidation of the entire image, even for unrelated automation.
 * *Blast radius* -- a broken dependency in the monolith disrupts all automation domains at once.
 
 .Do this:
