@@ -457,7 +457,7 @@ dependencies:
 Explanations::
 Every `execution-environment.yml` file, along with any supporting `requirements.yml`, `requirements.txt`, and `bindep.txt` files, must be stored in a Git repository.
 +
-Builds must be triggered automatically by CI/CD pipelines on relevant Git events (push to a watched branch, pull request merge, or a scheduled trigger for regular security updates).
+Builds must be triggered automatically by CI/CD pipelines on relevant Git events (push to a watched branch, pull requests, or a scheduled trigger for regular security updates).
 They must not be run manually from developer workstations.
 +
 The `infra.ee_utilities` collection from https://github.com/redhat-cop/ee_utilities[redhat-cop/ee_utilities] provides Ansible roles that integrate the build and push workflow directly into Automation Controller, allowing EE lifecycle management to be part of the broader Configuration as Code strategy.
