@@ -254,7 +254,7 @@ Common domain groupings include:
 * Cloud (AWS, Azure, GCP)
 * Virtualization (VMware, OpenShift Virt)
 +
-A separate, lightweight EE should be created for each domain rather than a single large image containing all collections.
+A separate, lightweight EE should be created for each domain rather than a single large image containing all collections and dependencies.
 
 Rationale::
 Combining unrelated automation workloads into a single EE creates several problems:
