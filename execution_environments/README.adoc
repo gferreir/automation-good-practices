@@ -162,7 +162,7 @@ dependencies:
 [%collapsible]
 ====
 Explanations::
-The base image tag in the `images.base_image.name` field must always reference a specific version, not the `:latest` shorthand.
+The base image tag in the `images.base_image.name` field must always reference a specific tag version, and must not use `:latest` as a value.
 +
 Red Hat distributes EE base images under two naming schemes, both requiring an explicit version:
 +
