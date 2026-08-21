@@ -461,7 +461,8 @@ Automated builds ensure that security patches in base images are applied regular
 
 Examples::
 +
-Minimal GitHub Actions workflow that builds and pushes an EE on every push to `main`:
+Minimal GitHub Actions workflow that builds and pushes an EE on every push to `main`.
+The example uses the Red Hat https://catalog.redhat.com/en/software/containers/ansible-automation-platform-27/ansible-builder-rhel9/69fb1e2545f6af701dad8723[`ansible-builder-rhel9`] container image and a two-step approach: `ansible-builder create` generates the build context (Containerfile + requirements), then the runner's native container engine builds the image from that context.
 +
 [source,yaml]
 ----
@@ -482,16 +483,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ansible-builder  # <1>
-        run: pip install ansible-builder
-
-      - name: Build EE
+      - name: Log in to Red Hat registry  # <1>
         run: |
-          ansible-builder build \
-            --file ee-linux/execution-environment.yml \
-            --tag quay.io/myorg/ee-linux:$(date +%Y-%m-%d) \
-            --container-runtime docker \
-            --verbosity 2
+          echo "${{ secrets.RH_REGISTRY_TOKEN }}" | \
+            docker login registry.redhat.io -u "${{ secrets.RH_REGISTRY_USER }}" --password-stdin
+
+      - name: Generate build context  # <2>
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work:Z" \
+            -w /work \
+            registry.redhat.io/ansible-automation-platform-27/ansible-builder-rhel9:latest \
+            ansible-builder create \
+              --file ee-linux/execution-environment.yml
+
+      - name: Build EE image  # <3>
+        run: |
+          docker build \
+            -f context/Containerfile \
+            -t quay.io/myorg/ee-linux:$(date +%Y-%m-%d) \
+            context
 
       - name: Push to registry
         run: |
@@ -499,7 +510,9 @@ jobs:
             docker login quay.io -u "${{ secrets.REGISTRY_USER }}" --password-stdin
           docker push quay.io/myorg/ee-linux:$(date +%Y-%m-%d)
 ----
-<1> Pin `ansible-builder` to a specific version in production pipelines, as you would any other build dependency. The example omits the pin for brevity -- see the https://pypi.org/project/ansible-builder/[PyPI page] for available versions.
+<1> Authentication for `registry.redhat.io` is required to pull the `ansible-builder-rhel9` image and any `ee-minimal` base image referenced by the definition. See https://access.redhat.com/RegistryAuthentication[Registry Authentication].
+<2> `ansible-builder create` generates a `Containerfile` and build context without requiring a container runtime inside the image. Pin the image tag (or use a digest) as you would any other build dependency. See the https://catalog.redhat.com/en/software/containers/ansible-automation-platform-27/ansible-builder-rhel9/69fb1e2545f6af701dad8723[Red Hat Ecosystem Catalog] for available tags.
+<3> The actual image build runs natively on the CI runner using the generated `Containerfile`.
 ====
 
 == Never persist build-time credentials in the shipped image
